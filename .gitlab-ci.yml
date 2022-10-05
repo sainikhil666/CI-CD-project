@@ -1,0 +1,85 @@
+stages:
+  - prepare
+  - deploy
+  - test
+
+variables:
+  STACK_NAME: assignment-nikhil666
+  API_GATEWAY_NAME: assignment-api-nikhil666
+  API_STAGE_NAME: welcome
+  API_HTTP_METHOD: GET
+  LAMBDA_FUNCTION_NAME: assignment-lambda-nikhil666
+  BUCKET_NAME: assignment-bucket-nikhil666
+  REGION: us-east-1
+
+# run on branch push, but not tags
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# anchors
+.get-env: &get-env
+  - >
+    if [ "$CI_COMMIT_BRANCH" == "main" ]; then
+      export ENVIRONMENT="prod"
+    else
+      export ENVIRONMENT="dev"
+    fi
+  - export BUILD_DATE=$(TZ="Asia/Kolkata" date "+%Y%m%d-%H%M")
+
+# jobs
+validate:
+  stage: prepare
+  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  script:
+    - echo "Validating template for ${STACK_NAME}"
+    - aws cloudformation validate-template --template-body file://template.yaml --region $REGION
+
+checkstack:
+  stage: prepare
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'develop'
+  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  script:
+    - echo "Checking if ${STACK_NAME} exists"
+    - export STACKEXISTS=false
+    - aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION && export STACKEXISTS=true
+    - echo "Stack exists? $STACKEXISTS"
+    - echo "STACKEXISTS=${STACKEXISTS}" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env 
+
+
+
+deploy:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH == 'develop'  
+  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  script:
+    - >
+      echo $STACKEXISTS; 
+      if [ "$STACKEXISTS" == "true" ]; then
+        aws s3api put-object --bucket ${BUCKET_NAME} --key data.json --body data.json
+        
+      else
+        echo "Creating ${STACK_NAME}" &&
+        aws cloudformation create-stack  \
+          --stack-name $STACK_NAME  \
+          --template-body file://template.yaml \
+          --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+          --region $REGION \
+          --parameters ParameterKey=apiGatewayName,ParameterValue=$API_GATEWAY_NAME ParameterKey=apiGatewayStageName,ParameterValue=$API_STAGE_NAME ParameterKey=apiGatewayHTTPMethod,ParameterValue=$API_HTTP_METHOD ParameterKey=lambdaFunctionName,ParameterValue=$LAMBDA_FUNCTION_NAME ParameterKey=bucketName,ParameterValue=$BUCKET_NAME &&
+        echo "Sleeping for 90 seconds to wait for s3 bucket to get created" &&
+        sleep 90 &&
+        aws s3api put-object --bucket ${BUCKET_NAME} --key data.json --body data.json
+      fi 
+    - echo "Adding flag files..."
+    - echo "pushing to S3"
+
+test:
+  image: python:latest
+  script:
+  - pip install requests
+  - python -m unittest tests.py
